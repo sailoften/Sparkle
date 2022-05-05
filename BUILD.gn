@@ -19,6 +19,7 @@ action("build_sparkle_framework") {
     "$root_out_dir/BinaryDelta",
     "$root_out_dir/generate_keys",
     "$root_out_dir/sign_update",
+    "$root_out_dir/generate_appcast",
   ]
 }
 
