@@ -63,8 +63,14 @@
 - (void)didFindValidUpdate
 {
     id<SUUpdaterPrivate> updater = self.updater;
+    SUAppcastItem *updateItem = self.updateItem;
     if ([[updater delegate] respondsToSelector:@selector(updater:didFindValidUpdate:)]) {
-        [[updater delegate] updater:self.updater didFindValidUpdate:self.updateItem];
+        [[updater delegate] updater:self.updater didFindValidUpdate:updateItem];
+    }
+
+    // Handle the case where the update indicates that an automatic update is only available for specific versions
+    if ([self itemPreventsAutoupdate:self.updateItem]) {
+        self.automaticallyInstallUpdates = NO;
     }
 
     if (self.automaticallyInstallUpdates) {
@@ -72,13 +78,12 @@
         return;
     }
 
-    SUAppcastItem *updateItem = self.updateItem;
     if (![self shouldShowUpdateAlertForItem:updateItem]) {
         [self abortUpdate];
         return;
     }
 
-    self.updateAlert = [[SUUpdateAlert alloc] initWithAppcastItem:updateItem host:self.host completionBlock:^(SUUpdateAlertChoice choice) {
+    self.updateAlert = [[SUUpdateAlert alloc] initWithAppcastItem:updateItem httpHeaders:updater.httpHeaders userAgent:updater.userAgentString host:self.host completionBlock:^(SUUpdateAlertChoice choice) {
         [self updateAlertFinishedWithChoice:choice forItem:updateItem];
     }];
 
@@ -92,7 +97,6 @@
     // update prompt to behave like a normal window. Otherwise if the window were hidden
     // there may be no way for the application to be activated to make it visible again.
     if ([SUApplicationInfo isBackgroundApplication:[NSApplication sharedApplication]]) {
-        [[self.updateAlert window] setHidesOnDeactivate:NO];
         [NSApp activateIgnoringOtherApps:YES];
     }
 

@@ -40,11 +40,12 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
 @property (strong) NSTimer *checkTimer;
 @property (assign) BOOL shouldRescheduleOnWake;
 @property (strong) NSBundle *sparkleBundle;
+@property (nonatomic) BOOL loggedNoSecureKeyWarning;
 
 - (instancetype)initForBundle:(NSBundle *)bundle;
 - (void)startUpdateCycle;
 - (void)checkForUpdatesWithDriver:(SUUpdateDriver *)updateDriver;
-- (void)scheduleNextUpdateCheck;
+- (void)scheduleNextUpdateCheckUsingCurrentDate:(BOOL)usingCurrentDate;
 - (void)registerAsObserver;
 - (void)unregisterAsObserver;
 - (void)updateDriverDidFinish:(NSNotification *)note;
@@ -69,6 +70,7 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
 @synthesize sparkleBundle;
 @synthesize decryptionPassword;
 @synthesize updateLastCheckedDate;
+@synthesize loggedNoSecureKeyWarning = _loggedNoSecureKeyWarning;
 
 static NSMutableDictionary *sharedUpdaters = nil;
 static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaultsObservationContext";
@@ -147,7 +149,9 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
 }
 
 -(void)checkIfConfiguredProperly {
-    BOOL hasPublicKey = self.host.publicKeys.dsaPubKey != nil || self.host.publicKeys.ed25519PubKey != nil;
+    BOOL hasDSAPublicKey = (self.host.publicKeys.dsaPubKey != nil);
+    BOOL hasEdDSAPublicKey = (self.host.publicKeys.ed25519PubKey != nil);
+    BOOL hasPublicKey = (hasDSAPublicKey || hasEdDSAPublicKey);
     BOOL isMainBundle = [self.host.bundle isEqualTo:[NSBundle mainBundle]];
     BOOL hostIsCodeSigned = [SUCodeSigningVerifier bundleAtURLIsCodeSigned:self.host.bundle.bundleURL];
     NSURL *feedURL = [self feedURL];
@@ -165,7 +169,19 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
             } else if (!servingOverHttps) {
                 [self showAlertText:SULocalizedString(@"Auto-update not configured", nil)
                     informativeText:[NSString stringWithFormat:SULocalizedString(@"For security reasons, updates to %@ need to be served over HTTPS and/or signed with an EdDSA key. See https://sparkle-project.org/documentation/ for more information.", nil), name]];
+            } else {
+                if (!self.loggedNoSecureKeyWarning) {
+                    SULog(SULogLevelError, @"Error: Serving updates without an EdDSA key and only using Apple Code Signing is deprecated and may be unsupported in a future release. Visit Sparkle's documentation for more information: https://sparkle-project.org/documentation/#3-segue-for-security-concerns");
+                    
+                    self.loggedNoSecureKeyWarning = YES;
+                }
             }
+        }
+    } else if (!hasEdDSAPublicKey) {
+        if (!self.loggedNoSecureKeyWarning) {
+            SULog(SULogLevelError, @"Error: Serving updates without an EdDSA key is insecure and deprecated. DSA support may be removed in a future Sparkle release. Please migrate to using EdDSA (ed25519). Visit Sparkle's documentation for migration information: https://sparkle-project.org/documentation/#3-segue-for-security-concerns");
+            
+            self.loggedNoSecureKeyWarning = YES;
         }
     }
 
@@ -239,7 +255,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
         // We start the update checks and register as observer for changes after the prompt finishes
     } else {
         // We check if the user's said they want updates, or they haven't said anything, and the default is set to checking.
-        [self scheduleNextUpdateCheck];
+        [self scheduleNextUpdateCheckUsingCurrentDate:YES];
     }
 }
 
@@ -255,7 +271,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
     {
         self.driver = nil;
         [self updateLastUpdateCheckDate];
-        [self scheduleNextUpdateCheck];
+        [self scheduleNextUpdateCheckUsingCurrentDate:NO];
     }
 }
 
@@ -277,7 +293,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
     [self didChangeValueForKey:@"lastUpdateCheckDate"];
 }
 
-- (void)scheduleNextUpdateCheck
+- (void)scheduleNextUpdateCheckUsingCurrentDate:(BOOL)usingCurrentDate
 {
     if (self.checkTimer)
     {
@@ -287,9 +303,20 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
     if (![self automaticallyChecksForUpdates]) return;
 
     // How long has it been since last we checked for an update?
-    NSDate *lastCheckDate = [self lastUpdateCheckDate];
-    if (!lastCheckDate) { lastCheckDate = [NSDate distantPast]; }
-    NSTimeInterval intervalSinceCheck = [[NSDate date] timeIntervalSinceDate:lastCheckDate];
+    NSTimeInterval intervalSinceCheck;
+    if (usingCurrentDate) {
+        NSDate *lastCheckDate = [self lastUpdateCheckDate];
+        if (!lastCheckDate) { lastCheckDate = [NSDate distantPast]; }
+        intervalSinceCheck = [[NSDate date] timeIntervalSinceDate:lastCheckDate];
+        if (intervalSinceCheck < 0) {
+            // Last update check date is in the future and bogus, so reset it to current date
+            [self updateLastUpdateCheckDate];
+            
+            intervalSinceCheck = 0;
+        }
+    } else {
+        intervalSinceCheck = 0;
+    }
 
     // Now we want to figure out how long until we check again.
     NSTimeInterval delayUntilCheck, updateCheckInterval = [self updateCheckInterval];
@@ -317,23 +344,13 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
 - (void)receiveWakeNote
 {
     if (self.shouldRescheduleOnWake) // the reason for rescheduling the update-check timer is that NSTimer does behave as if the time the Mac spends asleep did not exist at all, which can significantly prolong the time between update checks
-        [self scheduleNextUpdateCheck];
+        [self scheduleNextUpdateCheckUsingCurrentDate:YES];
 }
 
 - (void)checkForUpdatesInBackground
 {
     BOOL automatic = [self automaticallyDownloadsUpdates];
-    if (!automatic) {
-            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.notificationcenterui"];
-            BOOL dnd = [defaults boolForKey:@"doNotDisturb"];
-            if (dnd) {
-                SULog(SULogLevelDefault, @"Delayed update, because Do Not Disturb is on");
-                [self updateLastUpdateCheckDate];
-                [self scheduleNextUpdateCheck];
-                return;
-            }
-    }
-
+    
     // Do not use reachability for a preflight check. This can be deceptive and a bad idea. Apple does not recommend doing it.
     SUUpdateDriver *theUpdateDriver = [(SUBasicUpdateDriver *)[(automatic ? [SUAutomaticUpdateDriver class] : [SUScheduledUpdateDriver class])alloc] initWithUpdater:self];
     
@@ -380,7 +397,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
 
     if( [self.delegate respondsToSelector: @selector(updaterMayCheckForUpdates:)] && ![self.delegate updaterMayCheckForUpdates: self] )
     {
-        [self scheduleNextUpdateCheck];
+        [self scheduleNextUpdateCheckUsingCurrentDate:NO];
         return;
     }
 
@@ -389,7 +406,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
     // If we're not given a driver at all, just schedule the next update check and bail.
     if (!self.driver)
     {
-        [self scheduleNextUpdateCheck];
+        [self scheduleNextUpdateCheckUsingCurrentDate:NO];
         return;
     }
 
@@ -441,7 +458,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
 - (void)resetUpdateCycle
 {
     [[self class] cancelPreviousPerformRequestsWithTarget:self selector:@selector(resetUpdateCycle) object:nil];
-    [self scheduleNextUpdateCheck];
+    [self scheduleNextUpdateCheckUsingCurrentDate:YES];
 }
 
 - (void)setAutomaticallyChecksForUpdates:(BOOL)automaticallyCheckForUpdates
@@ -518,9 +535,8 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
     if (customUserAgentString) {
         return customUserAgentString;
     }
-
-    NSString *version = [self.sparkleBundle objectForInfoDictionaryKey:(__bridge NSString *)kCFBundleVersionKey];
-    NSString *userAgent = [NSString stringWithFormat:@"%@/%@ Sparkle/%@", [self.host name], [self.host displayVersion], version ? version : @"?"];
+    
+    NSString *userAgent = [NSString stringWithFormat:@"%@/%@ Sparkle/%@", [self.host name], [self.host displayVersion], @""MARKETING_VERSION];
     NSData *cleanedAgent = [userAgent dataUsingEncoding:NSASCIIStringEncoding allowLossyConversion:YES];
     return [[NSString alloc] initWithData:cleanedAgent encoding:NSASCIIStringEncoding];
 }

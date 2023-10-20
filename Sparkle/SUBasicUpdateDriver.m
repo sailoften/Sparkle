@@ -26,6 +26,7 @@
 #import "SUAppcast.h"
 #import "SUAppcastItem.h"
 #import "SUGlobalUpdateLock.h"
+#import "SUSystemUpdateInfo.h"
 
 #import "SPUURLRequest.h"
 #import "SPUDownloaderSession.h"
@@ -145,7 +146,35 @@
     return item;
 }
 
+- (BOOL)usesPhasedRollout
+{
+    return NO;
+}
+
+- (BOOL)isItemReadyForPhasedRollout:(SUAppcastItem *)ui {
+    if(![self usesPhasedRollout] || [ui isCriticalUpdate] || ![ui phasedRolloutInterval]) {
+        return YES;
+    }
+
+    NSDate* itemReleaseDate = ui.date;
+    if(!itemReleaseDate) {
+        return YES;
+    }
+
+    NSTimeInterval timeSinceRelease = [[NSDate date] timeIntervalSinceDate:itemReleaseDate];
+
+    NSTimeInterval phasedRolloutInterval = [[ui phasedRolloutInterval] doubleValue];
+    NSTimeInterval timeToWaitForGroup = phasedRolloutInterval * [SUSystemUpdateInfo updateGroupForHost:self.host];
+
+    return timeSinceRelease >= timeToWaitForGroup;
+}
+
 - (BOOL)hostSupportsItem:(SUAppcastItem *)ui
+{
+    return [self hostSupportsOperatingSystemInItem:ui] && [self isItemReadyForPhasedRollout:ui];
+}
+
+- (BOOL)hostSupportsOperatingSystemInItem:(SUAppcastItem *)ui
 {
     BOOL osOK = [ui isMacOsUpdate];
     if (([ui minimumSystemVersion] == nil || [[ui minimumSystemVersion] isEqualToString:@""]) &&
@@ -172,6 +201,11 @@
 - (BOOL)isItemNewer:(SUAppcastItem *)ui
 {
     return [[self versionComparator] compareVersion:[self.host version] toVersion:[ui versionString]] == NSOrderedAscending;
+}
+
+- (BOOL)itemPreventsAutoupdate:(SUAppcastItem *)ui
+{
+    return ([ui minimumAutoupdateVersion] && ! [[ui minimumAutoupdateVersion] isEqualToString:@""] && ([[self versionComparator] compareVersion:[self.host version] toVersion:[ui minimumAutoupdateVersion]] == NSOrderedAscending));
 }
 
 - (BOOL)itemContainsSkippedVersion:(SUAppcastItem *)ui
@@ -238,6 +272,13 @@
 - (void)didFindValidUpdate
 {
     assert(self.updateItem);
+
+    // Handle the case where the update indicates that an automatic update is only available for specific versions
+    if ([self itemPreventsAutoupdate:self.updateItem]) {
+        [self.updater setAutomaticallyDownloadsUpdates:NO]; // This call will persist this setting (automatic downloads will be permanently deactivated), but that is probably OK after the rare case of a non-automatically updateable update - the user can always reactivate this in the settings or when the update information window appears for the next time.
+        [self.updater checkForUpdatesInBackground]; // Will end up in SUUIBasedUpdateDriver instead of here
+        return;
+    }
 
     id<SUUpdaterPrivate> updater = self.updater;
 
@@ -311,7 +352,19 @@
         request.networkServiceType = NSURLNetworkServiceTypeBackground;
     }
 
-    [request setValue:[updater userAgentString] forHTTPHeaderField:@"User-Agent"];
+    NSString *userAgentString = [updater userAgentString];
+    if (userAgentString) {
+        [request setValue:userAgentString forHTTPHeaderField:@"User-Agent"];
+    }
+
+    NSDictionary<NSString *, NSString *> *httpHeaders = [updater httpHeaders];
+    if (httpHeaders) {
+        for (NSString *key in httpHeaders) {
+            NSString *value = [httpHeaders objectForKey:key];
+            [request setValue:value forHTTPHeaderField:key];
+        }
+    }
+
     if ([[updater delegate] respondsToSelector:@selector(updater:willDownloadUpdate:withRequest:)]) {
         [[updater delegate] updater:self.updater
                       willDownloadUpdate:self.updateItem
@@ -346,6 +399,12 @@
 {
     // finished. downloadData should be nil as this was a permanent download
     assert(self.updateItem);
+    
+    if (self.updateItem.phasedRolloutInterval != nil) {
+        // use new update group next time, even if the driver doesn't usesPhasedRollout
+        [SUSystemUpdateInfo setNewUpdateGroupIdentifierForHost:self.host];
+    }
+    
     id<SUUpdaterPrivate> updater = self.updater;
     if ([[updater delegate] respondsToSelector:@selector(updater:didDownloadUpdate:)]) {
         [[updater delegate] updater:self.updater didDownloadUpdate:self.updateItem];

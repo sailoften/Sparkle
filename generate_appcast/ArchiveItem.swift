@@ -24,7 +24,7 @@ class DeltaUpdate {
     class func create(from: ArchiveItem, to: ArchiveItem, archivePath: URL) throws -> DeltaUpdate {
         var applyDiffError: NSError?
 
-        if !createBinaryDelta(from.appPath.path, to.appPath.path, archivePath.path, .beigeMajorVersion, false, &applyDiffError) {
+        if !createBinaryDelta(from.appPath.path, to.appPath.path, archivePath.path, .version2, false, &applyDiffError) {
             throw applyDiffError!
         }
 
@@ -141,6 +141,7 @@ class ArchiveItem: CustomStringConvertible {
     var pubDate: String {
         let date = self.archiveFileAttributes[.creationDate] as! Date
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss ZZ"
         return formatter.string(from: date)
     }
@@ -212,7 +213,13 @@ class ArchiveItem: CustomStringConvertible {
                 .appendingPathExtension(languageCode)
                 .appendingPathExtension("html")
             if fileManager.fileExists(atPath: localizedReleaseNoteURL.path) {
-                localizedReleaseNotes.append((languageCode, localizedReleaseNoteURL))
+                if let releaseNotesURLPrefix = self.releaseNotesURLPrefix {
+                    localizedReleaseNotes.append((languageCode, URL(string: localizedReleaseNoteURL.lastPathComponent, relativeTo: releaseNotesURLPrefix)!))
+                }
+                else {
+                    localizedReleaseNotes.append((languageCode, URL(string: localizedReleaseNoteURL.lastPathComponent)!))
+                }
+                
             }
         }
         return localizedReleaseNotes
