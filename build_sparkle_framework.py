@@ -2,24 +2,65 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from os import chdir, getcwd
-from os.path import dirname, realpath
-from subprocess import check_call
+import os
+import os.path
+import shutil
+import subprocess
+import sys
 
 
-def main():
-    out_dir = getcwd()
-    sparkle_dir = dirname(realpath(__file__))
-    chdir(sparkle_dir)
+def Main(args):
+  out_dir = os.getcwd()
+  sparkle_dir = os.path.dirname(os.path.realpath(__file__))
+  os.chdir(sparkle_dir)
+  FNULL = open(os.devnull, 'w')
 
-    # Run `git submodule update --init` to update Vendor libs (i.e. ed25519)
-    check_call(['git', 'submodule', 'update', '--init'])
+  # Run `git submodule update --init` to update Vendor libs (i.e. ed25519)
+  command = ['git', 'submodule', 'update', '--init']
+  try:
+      subprocess.check_call(command)
+  except subprocess.CalledProcessError as e:
+      print(e.output)
+      raise e
 
-    out_dir_config = 'CONFIGURATION_BUILD_DIR=' + out_dir
+  out_dir_config = 'CONFIGURATION_BUILD_DIR=' + out_dir
+  command = ['xcodebuild', '-target', 'Sparkle', '-configuration', 'Release', out_dir_config, 'build']
+  try:
+      subprocess.check_call(command, stdout=FNULL)
+  except subprocess.CalledProcessError as e:
+      print(e.output)
+      raise e
 
-    for target in ('Sparkle', 'BinaryDelta', 'generate_keys', 'sign_update'):
-        check_call(['xcodebuild', '-target', target, '-configuration', 'Release', out_dir_config, 'build'])
+  command = ['xcodebuild', '-target', 'BinaryDelta', '-configuration', 'Release', out_dir_config, 'build']
+  try:
+      subprocess.check_call(command, stdout=FNULL)
+  except subprocess.CalledProcessError as e:
+      print(e.output)
+      raise e
+
+  command = ['xcodebuild', '-target', 'generate_keys', '-configuration', 'Release', out_dir_config, 'build']
+  try:
+      subprocess.check_call(command, stdout=FNULL)
+  except subprocess.CalledProcessError as e:
+      print(e.output)
+      raise e
+
+  command = ['xcodebuild', '-target', 'sign_update', '-configuration', 'Release', out_dir_config, 'build']
+  try:
+      subprocess.check_call(command, stdout=FNULL)
+  except subprocess.CalledProcessError as e:
+      print(e.output)
+      raise e
+
+  command = ['xcodebuild', '-target', 'generate_appcast', '-configuration', 'Release', out_dir_config, 'build']
+  try:
+      subprocess.check_call(command, stdout=FNULL)
+  except subprocess.CalledProcessError as e:
+      print(e.output)
+      raise e
+
+  return 0
 
 
 if __name__ == '__main__':
-    main()
+  sys.exit(Main(sys.argv))
